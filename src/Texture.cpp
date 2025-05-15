@@ -1,5 +1,7 @@
 #include "Texture.hpp"
 
+#include <codecvt>
+#include <locale>
 #include <stdexcept>
 
 #include "d3dx12_barriers.h"
@@ -60,7 +62,9 @@ ComPtr<ID3D12Resource> Texture::LoadFromFile(ID3D12Device* device,
         stbi_image_free(pixels);
         throw std::runtime_error("Failed to create texture resource");
     }
-    m_textureResource->SetName(filename.c_str()); // Use filename as debug name
+    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+    std::wstring wideName = converter.from_bytes(m_name);
+    m_textureResource->SetName(wideName.c_str()); // Use filename as debug name
 
     ComPtr<ID3D12Resource> uploadBuffer;
     UINT64 uploadBufferSize = 0;
@@ -81,7 +85,8 @@ ComPtr<ID3D12Resource> Texture::LoadFromFile(ID3D12Device* device,
         stbi_image_free(pixels);
         throw std::runtime_error("Failed to create upload buffer");
     }
-    uploadBuffer->SetName((filename + L" Upload Buffer").c_str()); // Use filename as debug name
+
+    uploadBuffer->SetName((wideName + L"Upload Buffer").c_str());
 
     D3D12_SUBRESOURCE_DATA textureData;
     textureData.pData = pixels;
@@ -91,7 +96,6 @@ ComPtr<ID3D12Resource> Texture::LoadFromFile(ID3D12Device* device,
     UpdateSubresources(commandList, m_textureResource.Get(), uploadBuffer.Get(), 0, 0, 1, &textureData);
     D3D12_RESOURCE_STATES finalStateAfterLoad = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     TransitionToState(commandList, finalStateAfterLoad); // Use the new method
-
 
     // --- 4. Create Shader Resource View (SRV) ---
     if (!descriptorHeap->allocateDescriptor(m_srvHandleCPU, m_srvHandleGPU)) {
@@ -114,15 +118,14 @@ ComPtr<ID3D12Resource> Texture::LoadFromFile(ID3D12Device* device,
 
 void Texture::TransitionToState(
     ID3D12GraphicsCommandList* pCmdList,
-    D3D12_RESOURCE_STATES targetState)
-{
+    D3D12_RESOURCE_STATES targetState) {
     if (!m_textureResource || !pCmdList) return;
 
     if (m_currentState != targetState) {
         auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
             m_textureResource.Get(),
             m_currentState, // Current actual state
-            targetState     // Desired state
+            targetState // Desired state
         );
         pCmdList->ResourceBarrier(1, &barrier);
         m_currentState = targetState; // Update tracked state

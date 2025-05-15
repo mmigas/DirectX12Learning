@@ -12,9 +12,8 @@ Application::Application(HINSTANCE hInstance) : m_hInstance(hInstance),
                                                 m_device(nullptr),
                                                 m_commandQueue(nullptr),
                                                 m_swapChain(nullptr),
-                                                m_renderer(nullptr), // Init new ptr
                                                 m_modelMesh(nullptr),
-                                                m_texture(nullptr),
+                                                m_textureRaster(nullptr),
                                                 m_camera(nullptr) {
     QueryPerformanceFrequency(&m_frequency);
     QueryPerformanceCounter(&m_lastFrameTime);
@@ -37,10 +36,17 @@ bool Application::init() {
 
     m_camera = std::make_unique<Camera>(m_window->getWidth(), m_window->getHeight());
 
-    m_renderer = std::make_unique<Renderer>();
-    if (!m_renderer || !m_renderer->init(m_device.get(), m_commandQueue.get(), m_swapChain.get(),
-                                         SwapChain::kBackBufferCount)) {
-        MessageBoxW(nullptr, L"Failed to initialize Renderer!", L"Error", MB_OK | MB_ICONERROR);
+    m_rendererRaster = std::make_unique<RenderRaster>();
+    m_rendererRayTracing = std::make_unique<RenderRayTracing>();
+    if (!m_rendererRaster || !m_rendererRaster->init(m_device.get(), m_commandQueue.get(), m_swapChain.get(),
+                                                     SwapChain::kBackBufferCount)) {
+        MessageBoxW(nullptr, L"Failed to create Renderer Raster!", L"Error", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    if (!m_rendererRayTracing || !m_rendererRayTracing->init(m_device.get(), m_commandQueue.get(), m_swapChain.get(),
+                                                             SwapChain::kBackBufferCount)) {
+        MessageBoxW(nullptr, L"Failed to initialize Renderer Ray Tracing!", L"Error", MB_OK | MB_ICONERROR);
         return false;
     }
 
@@ -48,9 +54,8 @@ bool Application::init() {
         MessageBoxW(nullptr, L"Failed to load content!", L"Initialization Error", MB_OK | MB_ICONERROR);
         return false;
     }
-    m_renderer->buildAccelerationStructures(m_modelMesh.get());
     updateMatrices();
-
+    m_rendererRayTracing->buildAccelerationStructures(m_modelMesh.get());
     m_window->show(SW_SHOWDEFAULT);
     return true;
 }
@@ -72,8 +77,10 @@ int Application::run() {
         if (m_isRunning) {
             float deltaTime = calculateDeltaTime();
             update(deltaTime);
-            if (m_renderer) {
-                m_renderer->render(deltaTime, m_camera.get(), m_modelMesh.get(), m_texture.get(), m_useRaytracing);
+            if (m_useRaytracing) {
+                m_rendererRayTracing->render(deltaTime, m_camera.get(), m_modelMesh.get(), m_textureRayTracing.get());
+            } else {
+                m_rendererRaster->render(deltaTime, m_camera.get(), m_modelMesh.get(), m_textureRaster.get());
             }
         }
     }
@@ -86,12 +93,18 @@ void Application::shutdown() {
     waitForGpuIdleAndClearUploads(); // Use helper
 
     // Shutdown renderer first (releases its DX objects)
-    if (m_renderer) m_renderer->shutdown();
-    m_renderer.reset();
+    if (m_rendererRaster) {
+        m_rendererRaster->shutdown();
+        m_rendererRaster.reset();
+    }
+    if (m_rendererRayTracing) {
+        m_rendererRayTracing->shutdown();
+        m_rendererRayTracing.reset();
+    }
 
     // Release Application owned resources
     m_modelMesh.reset();
-    m_texture.reset();
+    m_textureRaster.reset();
     m_camera.reset();
     m_swapChain.reset(); // Release before queue/device
     m_commandQueue.reset();
@@ -125,7 +138,11 @@ void Application::update(float deltaTime) {
         frameCount = 0;
     }
 
-    m_renderer->setTotalTime(m_renderer->getTotalTime() + deltaTime);
+    if (m_useRaytracing) {
+        m_rendererRayTracing->setTotalTime(m_rendererRayTracing->getTotalTime() + deltaTime);
+    } else {
+        m_rendererRaster->setTotalTime(m_rendererRaster->getTotalTime() + deltaTime);
+    }
 
     float scrollDelta = m_window->getAndResetMouseWheelDelta();
     float mouseDeltaX = 0.0f, mouseDeltaY = 0.0f;
@@ -154,8 +171,6 @@ void Application::update(float deltaTime) {
 
     // Update camera's view matrix based on new position/orientation
     m_camera->updateViewMatrix();
-
-    
 }
 
 bool Application::initDirectX() {
@@ -189,34 +204,41 @@ bool Application::loadAssets() {
     ID3D12Device* device = m_device->getDevice();
 
     // Need a temporary command list/allocator for asset uploads
-    ComPtr<ID3D12CommandAllocator> tempAllocator;
-    HRESULT hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&tempAllocator));
+    ComPtr<ID3D12CommandAllocator> allocator;
+    HRESULT hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
     if (FAILED(hr)) return false;
-    tempAllocator->SetName(L"Asset Load Allocator");
+    allocator->SetName(L"Asset Load Allocator");
 
-    ComPtr<ID3D12GraphicsCommandList> tempCommandList;
-    hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, tempAllocator.Get(), nullptr,
-                                   IID_PPV_ARGS(&tempCommandList));
+    ComPtr<ID3D12GraphicsCommandList> commandList;
+    hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+                                   IID_PPV_ARGS(&commandList));
     if (FAILED(hr)) return false;
-    tempCommandList->SetName(L"Asset Load Command List");
+    commandList->SetName(L"Asset Load Command List");
 
     m_uploadBuffers.clear(); // Clear previous tracking
 
     try {
         m_modelMesh = std::make_unique<Mesh>();
         // Replace "model.obj" with the path to your OBJ file
-        auto meshUploadBuffers = m_modelMesh->LoadFromObjFile(device, tempCommandList.Get(), "mitsuba.obj");
+        auto meshUploadBuffers = m_modelMesh->LoadFromObjFile(device, commandList.Get(), "mitsuba.obj");
         if (meshUploadBuffers.first) {
             trackUploadBuffer(meshUploadBuffers.first);
         }
         if (meshUploadBuffers.second) {
             trackUploadBuffer(meshUploadBuffers.second);
         }
-        m_texture = std::make_unique<Texture>();
+        m_textureRaster = std::make_unique<Texture>();
+        m_textureRayTracing = std::make_unique<Texture>();
 
-        ComPtr<ID3D12Resource> texUploadBuffer = m_texture->LoadFromFile(
-            device, tempCommandList.Get(), m_renderer->getSrvHeap().get(), L"texture.png"); // Use Renderer's heap
-        trackUploadBuffer(texUploadBuffer);
+        ComPtr<ID3D12Resource> texUploadBufferRaster = m_textureRaster->LoadFromFile(
+            device, commandList.Get(), m_rendererRaster->getSrvHeap().get(), L"texture.png",
+            "Texture Raster"); // Use Renderer's heap
+        trackUploadBuffer(texUploadBufferRaster);
+        
+        ComPtr<ID3D12Resource> texUploadBufferRayTracing = m_textureRayTracing->LoadFromFile(
+            device, commandList.Get(), m_rendererRayTracing->getSrvHeap().get(), L"texture_raytracing.png",
+            "Texture Ray Tracing"); // Use Renderer's heap
+        trackUploadBuffer(texUploadBufferRayTracing);
     } catch (const std::exception& e) {
         OutputDebugStringA("Error loading assets: ");
         OutputDebugStringA(e.what());
@@ -225,18 +247,14 @@ bool Application::loadAssets() {
         return false;
     }
     // --- Execute Asset Upload Commands ---
-    hr = tempCommandList->Close();
+    hr = commandList->Close();
     if (FAILED(hr)) return false;
-    ID3D12CommandList* ppCommandLists[] = {tempCommandList.Get()};
+    ID3D12CommandList* ppCommandLists[] = {commandList.Get()};
     m_commandQueue->executeCommandLists(1, ppCommandLists);
 
     // Wait for GPU to finish uploads and clear tracking list
     waitForGpuIdleAndClearUploads();
 
-    // Signal renderer that uploads are done (optional, if needed)
-    if (m_renderer) {
-        m_renderer->signalAssetUploadComplete();
-    }
 
     return true;
 }

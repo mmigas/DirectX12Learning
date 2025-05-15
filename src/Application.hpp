@@ -1,18 +1,16 @@
 #pragma once
 
-#include "Buffer.hpp"
-#include "CommandListManager.hpp"
 #include "CommandQueue.hpp"
 #include "DX12Device.hpp"
 #include "PipelineStateObject.hpp"
-#include "RootSignature.hpp"
-#include "Shader.hpp"
 #include "SwapChain.hpp"
 #include "Window.hpp"
 #include "Camera.hpp"
 #include "Mesh.hpp"
-#include "Renderer.hpp"
+//#include "Renderer.hpp"
 #include "Texture.hpp"
+#include "renderer/RenderRaster.hpp"
+#include "renderer/RenderRayTracing.hpp"
 
 
 // This header won't be included in other files so its ok to use namespaces here
@@ -53,11 +51,13 @@ private:
     std::unique_ptr<SwapChain> m_swapChain;
 
     // --- Renderer (Owns pipeline state, heaps, CBs, etc.) ---
-    std::unique_ptr<Renderer> m_renderer;
+    std::unique_ptr<RenderRaster> m_rendererRaster;
+    std::unique_ptr<RenderRayTracing> m_rendererRayTracing;
 
     // --- High-Level Assets (Owned by Application) ---
     std::unique_ptr<Mesh> m_modelMesh;
-    std::unique_ptr<Texture> m_texture;
+    std::unique_ptr<Texture> m_textureRaster;
+    std::unique_ptr<Texture> m_textureRayTracing;
 
     // --- Camera ---
     std::unique_ptr<Camera> m_camera;
@@ -69,8 +69,8 @@ private:
 
     // Keep upload buffers alive until GPU is done with copies
     std::vector<ComPtr<ID3D12Resource>> m_uploadBuffers;
-    bool m_useRaytracing = false;
-    
+    bool m_useRaytracing = true;
+
     void trackUploadBuffer(const ComPtr<ID3D12Resource>& uploadBuffer);
 
     void waitForGpuIdleAndClearUploads(); // Helper to wait and clear

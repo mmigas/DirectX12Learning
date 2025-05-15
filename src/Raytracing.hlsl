@@ -1,155 +1,177 @@
-// Raytracing.hlsl (Assignment 11 - Camera Rays & Texturing - Corrected)
+// Raytracing.hlsl (Corrected)
 
 // Define payload structure
 struct RayPayload {
     float4 color;
+    float visibility;
     // Add other data like recursion depth later if needed
 };
 
 // --- Global Root Signature Bindings ---
-// Param 0: Output UAV Table (u0)
 RWTexture2D<float4> g_output : register(u0);
-// Param 1: TLAS SRV (t0) - Root Descriptor
 RaytracingAccelerationStructure g_tlas : register(t0);
-// Param 2: Camera CBV Table (b1)
+
 cbuffer CameraParams : register(b1) {
-    float4x4 invViewProjection; // Corrected from invViewProjectionMatrix to match C++ DXRCameraConstants
-    float3 cameraPosition;      // Corrected from cameraPositionW to match C++ DXRCameraConstants
-    // float _pad1; // Padding is in C++ struct, not directly reflected here
+    float4x4 invViewProjection;
+    float3 cameraPosition;
 };
-// Param 3: Texture SRV Table (t1)
+
 Texture2D g_texture : register(t1);
-// Param 4: VB SRV Table (t2)
-struct Vertex { // Ensure this matches the C++ Vertex struct exactly
-    float3 position; // Changed from : POSITION semantic as it's raw data
-    float4 color;
+SamplerState g_sampler : register(s0); // Ensure this is used with g_texture
+
+struct Vertex {
+    float3 position;
+    float4 color; // If you have per-vertex color, ensure it's used or remove
     float2 texCoord;
     float3 normal;
 };
 StructuredBuffer<Vertex> g_vertexBuffer : register(t2);
-// Param 5: IB SRV Table (t3)
 ByteAddressBuffer g_indexBuffer : register(t3);
 
-// Sampler (Static Sampler)
-SamplerState g_sampler : register(s0);
-
-cbuffer DXRObjectConstants : register(b2) {               // Param 6: DXR Object CBV
+cbuffer DXRObjectConstants : register(b2) {
     float4x4 worldMatrix;
-    float4x4 invTransposeWorldMatrix; // For normals
+    float4x4 invTransposeWorldMatrix;
 };
 
 cbuffer LightConstants : register(b3) {
     float4 ambientColor;
-    float4 lightColor;       // Diffuse/Specular color of the light
-    float3 lightPosition;    // World space
-	float3 _pad1;
+    float4 lightColor;
+    float3 lightPosition;
+    // float3 _pad1; // Padding defined in C++, not needed here if offsets are correct
 };
-// Param 8: Material CBV Table (b4)
+
 cbuffer MaterialConstants : register(b4) {
-    float4 specularColor;    // Material's specular reflectivity color
-    float specularPower;    // Material's shininess
+    float4 specularColor;
+    float specularPower;
 };
+
 
 // --- Ray Generation Shader ---
 [shader("raygeneration")]
 void RayGen() {
     uint2 dispatchIndex = DispatchRaysIndex().xy;
     uint2 size = DispatchRaysDimensions().xy;
-    
-    // Calculate normalized device coordinates (NDC) [-1, 1] for x, [1, -1] for y
+
     float ndcX = ((float)dispatchIndex.x + 0.5f) / (float)size.x * 2.0f - 1.0f;
-    float ndcY = ((float)dispatchIndex.y + 0.5f) / (float)size.y * -2.0f + 1.0f; // Flip Y for typical DX convention
-    
-    // Unproject NDC coordinates to world space using inverse ViewProj matrix
-    float4 nearPointNDC = float4(ndcX, ndcY, 0.0f, 1.0f); // Point on near plane in NDC
+    float ndcY = ((float)dispatchIndex.y + 0.5f) / (float)size.y * -2.0f + 1.0f;
+
+    float4 nearPointNDC = float4(ndcX, ndcY, 0.0f, 1.0f);
     float4 nearPointWorld = mul(invViewProjection, nearPointNDC);
-    nearPointWorld /= nearPointWorld.w; // Perspective divide
-    
-    // Calculate ray origin and direction from camera
-    float3 calculatedRayOrigin = cameraPosition; // Use cameraPosition from CB
+    nearPointWorld /= nearPointWorld.w;
+
+    float3 calculatedRayOrigin = cameraPosition;
     float3 calculatedRayDirection = normalize(nearPointWorld.xyz - calculatedRayOrigin);
 
-    // Initialize payload BEFORE TraceRay
     RayPayload payload;
-    payload.color = float4(0.0f, 0.0f, 0.0f, 1.0f); // Default to black (or another debug color)
+    payload.color = float4(0.0f, 0.0f, 0.0f, 1.0f); // Initialize color
+    payload.visibility = -999.0f; // Initialize visibility (will be set by CHS or Miss)
 
     RayDesc ray;
-    ray.Origin    = calculatedRayOrigin;    // Use camera-derived origin
-    ray.Direction = calculatedRayDirection; // Use camera-derived direction
-    ray.TMin      = 0.01f;                  // Start ray slightly in front of camera
-    ray.TMax      = 10000.0f;               // Max distance
+    ray.Origin = calculatedRayOrigin;
+    ray.Direction = calculatedRayDirection;
+    ray.TMin = 0.01f;
+    ray.TMax = 10000.0f;
 
-    // Trace the ray
     TraceRay(
-        g_tlas,                     // Acceleration Structure
-        RAY_FLAG_NONE,              // Ray Flags
-        0xFF,                       // Instance Inclusion Mask (check all instances)
-        0,                          // Ray Contribution To Hit Group Index (offset in SBT for this geometry type)
-        1,                          // Multiplier for Geometry Index (stride in SBT if multiple geom types per hit group)
-        0,                          // Miss Shader Index (offset in SBT for miss shaders)
-        ray,                        // Ray description
-        payload                     // Input/Output payload
+        g_tlas,
+        RAY_FLAG_NONE,
+        0xFF,
+        0, // Ray Contribution To Hit Group Index (Primary hit group)
+        1, // Multiplier for Geometry Index
+        0, // Miss Shader Index (Primary miss shader)
+        ray,
+        payload
     );
 
-    // Write the final color from the payload (set by Miss or ClosestHit)
-    g_output[dispatchIndex] =  payload.color;
+    g_output[dispatchIndex] = payload.color;
 }
 
-// --- Miss Shader ---
-// Executes when a ray doesn't hit anything in the TLAS
+// --- Miss Shader (Primary Rays) ---
 [shader("miss")]
 void Miss(inout RayPayload payload) {
-    // Set the payload color to a background color
-    payload.color = float4(0.1f, 0.1f, 0.1f, 1.0f); // Blue background
+    payload.color = float4(0.1f, 0.1f, 0.1f, 1.0f); // Dark blue/grey for primary miss
 }
 
-// --- Closest Hit Shader ---
-// Executes when a ray finds its closest hit
+// --- Closest Hit Shader (Primary Rays) ---
+// Exported as "ClosestHit" in C++, used by Primary HitGroup
 [shader("closesthit")]
 void ClosestHit(inout RayPayload payload, BuiltInTriangleIntersectionAttributes attribs) {
-    // Get hit info
-    float3 barycentrics = float3(1.0f - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
-    uint primitiveIdx = PrimitiveIndex(); // Index of the triangle within the geometry
-
-    // Base address in index buffer for this triangle's indices
-    // Assuming 32-bit indices (4 bytes)
-    uint indexSizeInBytes = 4;
+    // 1. Calculate actual hit point attributes (worldPosition, worldNormal)
+    float3 bary = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
+    uint primitiveIdx = PrimitiveIndex();
+    uint indexSizeInBytes = 4; // Assuming R32_UINT indices
     uint indexOffset = primitiveIdx * 3 * indexSizeInBytes;
 
-    // Load the 3 vertex indices for this triangle
     uint i0 = g_indexBuffer.Load(indexOffset);
     uint i1 = g_indexBuffer.Load(indexOffset + indexSizeInBytes);
     uint i2 = g_indexBuffer.Load(indexOffset + indexSizeInBytes * 2);
 
-    // Load the vertex data for the 3 vertices
     Vertex v0 = g_vertexBuffer[i0];
     Vertex v1 = g_vertexBuffer[i1];
     Vertex v2 = g_vertexBuffer[i2];
 
-    // Interpolate attributes using barycentric coordinates
-    float2 hitTexCoord = v0.texCoord * barycentrics.x + v1.texCoord * barycentrics.y + v2.texCoord * barycentrics.z;
-    float3 objectNormal = v0.normal * barycentrics.x + v1.normal * barycentrics.y + v2.normal * barycentrics.z;
-    float3 objectPosition = v0.position * barycentrics.x + v1.position * barycentrics.y + v2.position * barycentrics.z;
+    float3 objectNormal = v0.normal * bary.x + v1.normal * bary.y + v2.normal * bary.z;
+    float3 objectPosition = v0.position * bary.x + v1.position * bary.y + v2.position * bary.z;
+    float2 hitTexCoord = v0.texCoord * bary.x + v1.texCoord * bary.y + v2.texCoord * bary.z; // For texturing later
 
     float3 worldPosition = mul(worldMatrix, float4(objectPosition, 1.0)).xyz;
-    float3 worldNormal = normalize(mul((float3x3)invTransposeWorldMatrix, objectNormal)); // Use invTranspose for normals
-	
-	float3 lightDir = normalize(lightPosition - worldPosition);
-	float3 viewDir = normalize(cameraPosition - worldPosition);
+    float3 worldNormal = normalize(mul((float3x3)invTransposeWorldMatrix, objectNormal));
 
-	float4 ambient = ambientColor;
+    // 2. --- Shadow Ray Tracing Section ---
+    payload.color = float4(0.0f, 0.0f, 0.0f, 1.0f); // Fallback dark grey if neither shadow shader runs
 
+    float shadowRayBias = 0.005f;
+    RayDesc shadowRay;
+    shadowRay.Origin = worldPosition + worldNormal * shadowRayBias; // Origin from actual hit point
+
+    // Direction towards the actual light source
+    float3 shadowDirVector = lightPosition - shadowRay.Origin;
+    
+    shadowRay.Direction = normalize(shadowDirVector); 
+    
+    shadowRay.TMin = 0.0f; // Start immediately from biased origin
+    shadowRay.TMax = length(shadowDirVector); // Ray length is distance to light
+                                              // If TMax is zero or negative, ray is invalid.
+                                              // DXR might treat this as an immediate miss.
+
+    TraceRay(
+        g_tlas,
+        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+        RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+        RAY_FLAG_FORCE_NON_OPAQUE, // Standard shadow flags
+        0xFF,       // Instance Mask
+        1,          // Ray Contribution To Hit Group Index (ShadowHitGroup - SBT Index 1)
+        1,          // Multiplier for Geometry Index
+        1,          // Miss Shader Index (ShadowMiss - SBT Miss Index 1)
+        shadowRay,
+        payload     // payload.color and .visibility will be set by ShadowAnyHit or ShadowMiss
+    );
+    float3 lightDir = normalize(lightPosition - worldPosition);
+    float3 viewDir = normalize(cameraPosition - worldPosition);
+
+    float4 ambient = ambientColor;
     float4 diffuse = max(dot(worldNormal, lightDir), 0.0f) * lightColor;
-		
-	float3 halfwayDir = normalize(lightDir + viewDir);
-	float specFactor = pow(max(dot(worldNormal, halfwayDir), 0.0f), specularPower);
-	float4 specular = specFactor * specularColor;
+    
+    float3 halfwayDir = normalize(lightDir + viewDir);
+    float specFactor = pow(max(dot(worldNormal, halfwayDir), 0.0f), specularPower);
+    float4 specular = specFactor * specularColor;
 
-	float4 lighting = ambient + diffuse + specular;
+    float4 lighting = ambient + (diffuse + specular) * payload.visibility;
 
-    // Sample texture
-    float4 textureColor = g_texture.SampleLevel(g_sampler, hitTexCoord, 0.0f); // Use t1 for texture
+    float4 textureColor = g_texture.SampleLevel(g_sampler, hitTexCoord, 0.0f);
 
-    // Set payload color (just texture for now)
-    payload.color = saturate(textureColor * lighting); // Apply lighting to texture color
-   }
+    payload.color = saturate(textureColor * lighting);
+}
+// --- Shadow Miss Shader ---
+[shader("miss")] // This must match the export name "ShadowMiss" from C++
+void ShadowMiss(inout RayPayload payload) { // Function name must match C++ export: ShadowMiss
+    payload.visibility = 1.0f; // Standard: 1.0 for lit
+
+}
+
+// --- Shadow Any Hit Shader ---
+[shader("anyhit")]
+void ShadowAnyHit(inout RayPayload payload, BuiltInTriangleIntersectionAttributes attribs) {
+    payload.visibility = 0.0f; // Standard: 0.0 for shadowed
+    AcceptHitAndEndSearch(); 
+}

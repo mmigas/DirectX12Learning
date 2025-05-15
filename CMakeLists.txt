@@ -21,7 +21,9 @@ set(HEADER_FILES
         src/DescriptorHeap.hpp
         src/Texture.hpp
         src/Mesh.hpp
-        src/Renderer.hpp
+        src/renderer/BaseRenderer.hpp
+        src/renderer/RenderRaster.hpp
+        src/renderer/RenderRayTracing.hpp
 )
 
 set(SRC_FILES
@@ -40,7 +42,9 @@ set(SRC_FILES
         src/DescriptorHeap.cpp
         src/Texture.cpp
         src/Mesh.cpp
-        src/Renderer.cpp
+        src/renderer/BaseRenderer.cpp
+        src/renderer/RenderRaster.cpp
+        src/renderer/RenderRayTracing.cpp
 )
 
 add_subdirectory(libs/DirectX-Headers)
@@ -67,6 +71,7 @@ target_include_directories(DirectX12Learning PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/libs/DirectX-Headers/include/dxguids"
         "${CMAKE_SOURCE_DIR}/libs/glm"
         "${CMAKE_SOURCE_DIR}/dxcCompiler/include"
+        "${CMAKE_SOURCE_DIR}/src"
 )
 
 # Copy shaders to output directory

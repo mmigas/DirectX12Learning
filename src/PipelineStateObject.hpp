@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d3d12.h>
+#include <string>
 #include <wrl/client.h> // ComPtr
 
 class PipelineStateObject {
@@ -13,6 +14,10 @@ public:
 
     ID3D12PipelineState* getPipeline() const {
         return m_pipelineState.Get();
+    }
+
+    void setName(std::wstring name) {
+        m_pipelineState->SetName(name.c_str());
     }
 
 private:
